@@ -1,0 +1,1783 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// StrataFlow — Prisma Schema
+// Phase 2 (core):      User · Building · StrataLot · CouncilMembership
+// Phase 2 (expansion): Permission · RolePermission
+// Phase 2 (ops):       Meeting · AgendaItem · Minutes · Document · AuditLog
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Uncomment for connection pooling (Supabase / PgBouncer):
+  // directUrl = env("DIRECT_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENUMS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// System-level role. Controls which features a user can access globally.
+/// Council-specific authority is captured separately in CouncilMembership.role.
+enum UserRole {
+  admin          // Full platform access (SaaS operator / super-admin)
+  manager        // Property manager — can act on behalf of multiple buildings
+  council_member // Elected member of at least one strata council
+  owner          // Lot owner with no council seat (default for new sign-ups)
+  tenant         // Occupant who does not own their lot
+}
+
+/// Roles a person may hold within a specific strata council.
+/// Multiple people may share the same CouncilRole across buildings,
+/// but a user may only hold ONE active role per building at a time.
+enum CouncilRole {
+  president
+  vice_president
+  treasurer
+  secretary
+  member_at_large
+}
+
+// ── Meeting ──────────────────────────────────────────────────────────────────
+
+enum MeetingType {
+  agm          // Annual General Meeting — legislated, highest quorum required
+  special      // Special General Meeting — called for a single topic
+  council      // Regular strata council meeting
+  committee    // Sub-committee (finance, maintenance, etc.)
+}
+
+enum MeetingStatus {
+  scheduled    // Future meeting, not yet started
+  in_progress  // Currently ongoing
+  completed    // Concluded; minutes may or may not be published yet
+  cancelled    // Called off
+}
+
+/// Per-item lifecycle within an agenda.
+enum AgendaItemStatus {
+  pending    // Not yet reached in the meeting
+  discussed  // Raised and discussed; no formal resolution recorded
+  resolved   // Motion carried / decision formally recorded
+  tabled     // Deferred to a future meeting
+  withdrawn  // Removed from the agenda before or during the meeting
+}
+
+/// Minutes lifecycle from creation through member-visible publication.
+enum MinutesStatus {
+  draft        // Being authored; not visible to non-council members
+  under_review // Circulated to council for approval
+  approved     // Approved by council; ready to publish
+  published    // Visible to all eligible building members
+}
+
+// ── Document ─────────────────────────────────────────────────────────────────
+
+enum DocumentCategory {
+  minutes              // Meeting minutes (often auto-linked to a Minutes record)
+  bylaw                // Strata bylaw or rule
+  financial            // Budget, financial statement, levy notice
+  insurance            // Policy documents and certificates
+  maintenance_report   // Depreciation reports, inspection reports
+  legal                // Legal correspondence, court orders
+  correspondence       // General correspondence with owners/vendors
+  notice               // Formal notices to owners/tenants
+  form                 // Standard forms (e.g. alteration request)
+  other
+}
+
+// ── Audit ─────────────────────────────────────────────────────────────────────
+
+/// Exhaustive set of auditable actions across all resources.
+/// Extend here when adding new resource types — never remove existing values.
+enum AuditAction {
+  create
+  update
+  delete
+  restore       // Reversal of a soft delete
+  publish       // Content made visible to wider audience (minutes, documents)
+  approve
+  reject
+  assign        // Resource ownership/responsibility transferred
+  upload
+  download      // Recorded for sensitive documents (legal, financial)
+  login
+  logout
+  invite        // User invited to building
+  revoke        // Access revoked
+}
+
+// ── Maintenance ───────────────────────────────────────────────────────────────
+
+/// Lifecycle stages for a maintenance request.
+/// Transitions are one-directional and enforced at the service layer:
+///   open → in_progress → resolved → closed
+/// "resolved" means work is done; "closed" means formally signed off / invoiced.
+enum MaintenanceStatus {
+  open         // Newly reported; not yet assigned
+  in_progress  // Assigned and work has begun
+  resolved     // Work completed; awaiting owner/council sign-off
+  closed       // Formally closed; no further action required
+}
+
+enum MaintenancePriority {
+  low     // Cosmetic or convenience issue; address in normal schedule
+  medium  // Noticeable defect; schedule within 2 weeks
+  high    // Significant issue affecting habitability or safety; within 72 h
+  urgent  // Emergency — water leak, fire, security breach; immediate response
+}
+
+/// Logical grouping for reporting and filtering.
+enum MaintenanceCategory {
+  plumbing
+  electrical
+  structural      // Walls, roof, foundation, windows
+  hvac            // Heating, ventilation, air conditioning
+  elevator
+  fire_safety     // Sprinklers, alarms, extinguishers
+  landscaping
+  cleaning        // Common area cleaning, pest control
+  security        // Locks, cameras, intercom
+  it_telecom      // Internet, cable, intercom systems
+  appliance       // Common-area appliances
+  other
+}
+
+// ── Invoice ───────────────────────────────────────────────────────────────────
+
+/// What kind of charge the invoice represents.
+enum InvoiceType {
+  strata_fee    // Regular periodic contribution to operating fund
+  special_levy  // One-time approved levy for a specific project
+  fine          // By-law infraction fine
+  repair_charge // Repair cost chargeable to specific lot owner
+  utility       // Sub-metered water, electricity, or gas
+  other
+}
+
+/// Invoice lifecycle — transitions driven by payment events and admin actions.
+/// partially_paid and overdue are mutually exclusive with paid/void.
+enum InvoiceStatus {
+  draft          // Created but not yet sent to recipient
+  issued         // Sent; payment expected by dueDate
+  partially_paid // One or more payments received; balance remains
+  paid           // Fully settled
+  overdue        // Past dueDate with outstanding balance (set by scheduled job)
+  void           // Cancelled; no longer collectible
+  written_off    // Deemed uncollectable; removed from receivables
+}
+
+// ── Payment ───────────────────────────────────────────────────────────────────
+
+/// Status of an individual payment transaction.
+enum PaymentStatus {
+  pending    // Initiated; awaiting confirmation from provider
+  completed  // Successfully processed and funds confirmed
+  failed     // Attempt failed (insufficient funds, declined, etc.)
+  refunded   // Funds returned to payer
+  cancelled  // Cancelled before processing began
+}
+
+/// How the payment was made.
+enum PaymentMethod {
+  bank_transfer  // EFT / wire transfer
+  cheque         // Physical cheque
+  credit_card
+  debit_card
+  cash
+  direct_debit   // Pre-authorised debit (PAD agreement)
+  online_portal  // Owner-facing payment portal (generic)
+  other
+}
+
+/// External payment provider that processed the transaction.
+/// Used with providerRef for idempotency and reconciliation.
+enum PaymentProvider {
+  stripe
+  paypal
+  square
+  moneris       // Common in Canadian strata
+  manual        // Recorded manually by an admin (cheque, cash, EFT receipt)
+  other
+}
+
+// ── Notification ─────────────────────────────────────────────────────────────
+
+/// What triggered the notification — used by the frontend to choose an icon
+/// and by the email renderer to pick a template.
+enum NotificationType {
+  maintenance_update  // Status change on a maintenance request
+  payment_due         // Invoice approaching or past due date
+  payment_received    // Payment successfully processed
+  meeting_reminder    // Upcoming meeting alert
+  meeting_published   // Minutes published for a completed meeting
+  document_shared     // New document uploaded and visible to this user
+  vote_opened         // A vote the user is eligible to cast has opened
+  vote_closing_soon   // Vote closes within 24 hours
+  vote_closed         // Vote results available
+  invoice_issued      // New invoice created for this user
+  member_invited      // Welcome notification for newly invited users
+  request_assigned    // Maintenance request assigned to this user
+  low_stock           // InventoryItem below lowStockThreshold (council only)
+  announcement        // General broadcast message from council
+}
+
+/// Where the notification is delivered.
+/// A single notification row always represents one channel.
+/// For multi-channel delivery, create one row per channel.
+enum NotificationChannel {
+  in_app  // Surfaced in the notification centre within the app
+  email   // Sent via Nodemailer to the user's registered address
+}
+
+// ── Inventory ─────────────────────────────────────────────────────────────────
+
+enum InventoryCategory {
+  electrical    // Bulbs, fuses, switches
+  plumbing      // Fittings, washers, valves
+  hardware      // Fasteners, hinges, handles
+  cleaning      // Detergents, mops, bags
+  safety        // Fire extinguishers, first aid, signs
+  landscaping   // Seeds, soil, tools
+  it_equipment  // Cables, access points, batteries
+  furniture     // Common-area furniture
+  tools         // Power tools, hand tools
+  other
+}
+
+/// Lifecycle of a purchase request, enforced at service layer (forward-only).
+///   requested → approved → ordered → received
+///   Any non-terminal state → cancelled
+enum PurchaseRequestStatus {
+  requested  // Submitted; awaiting council/manager approval
+  approved   // Approved; ready to place order with supplier
+  ordered    // Purchase order sent to supplier
+  received   // Goods delivered and stock updated
+  cancelled  // Rejected or abandoned at any pre-received stage
+}
+
+/// Type of stock movement.  Positive delta = stock in; negative = stock out.
+enum StockTransactionType {
+  received    // New stock delivered (purchase or donation)
+  issued      // Items given out (contractor, repair job)
+  adjustment  // Manual correction after physical count
+  returned    // Items returned to storage after being issued
+  damaged     // Written off as damaged or expired
+  transferred // Moved between storage locations (future: multi-location)
+}
+
+// ── Vote ──────────────────────────────────────────────────────────────────────
+
+enum VoteStatus {
+  draft      // Being configured; not visible to members
+  open       // Accepting ballots between opensAt and closesAt
+  closed     // Voting period ended; results visible
+  cancelled  // Vote called off before or during the open period
+}
+
+/// Who is eligible to cast a ballot on this vote.
+/// Checked at service layer against User.role and lot ownership/tenancy.
+enum VoteEligibility {
+  all_owners    // Only registered lot owners (most common in strata law)
+  all_members   // Owners AND tenants
+  council_only  // Restricted to current active council members
+}
+
+/// What fraction of cast votes (or eligible voters) constitutes a pass.
+enum VoteQuorumType {
+  simple_majority  // > 50% of ballots cast
+  two_thirds       // ≥ 66.7% of ballots cast
+  unanimous        // 100% of ballots cast
+  custom           // Defined by quorumPercent field on the Vote
+}
+
+// ── Permission scope ─────────────────────────────────────────────────────────
+
+/// Distinguishes which role axis a permission belongs to.
+///   system   → checked against User.role   (platform-wide gate)
+///   building → checked against CouncilMembership.role for a given building
+///
+/// Keeping this on Permission (not RolePermission) lets the query planner
+/// filter the whole permission set before joining to role assignments.
+enum PermissionScope {
+  system
+  building
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NEXTAUTH ADAPTER MODELS (required by @auth/prisma-adapter)
+// ═══════════════════════════════════════════════════════════════════════════
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// USER
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Central identity record. One row per real person regardless of how many
+/// buildings they are associated with or how many roles they hold.
+/// NextAuth stores OAuth/session data in Account/Session — never duplicate here.
+model User {
+  id            String    @id @default(cuid())
+  /// NextAuth requires these exact field names
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+
+  /// Additional profile fields
+  phone         String?
+  bio           String?   @db.Text
+
+  /// System role — coarse-grained access gate.
+  /// Fine-grained permissions are derived from CouncilMembership at runtime.
+  role          UserRole  @default(owner)
+
+  /// Soft-delete / deactivation. Deactivated users cannot sign in
+  /// but their historical records (audit, payments) are preserved.
+  isActive      Boolean   @default(true)
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // ── NextAuth relations ──────────────────────────────────────────────────
+  accounts Account[]
+  sessions Session[]
+
+  // ── Domain relations ────────────────────────────────────────────────────
+  /// Lots this user owns (one user may own multiple lots across buildings)
+  ownedLots          StrataLot[]         @relation("LotOwner")
+
+  /// Lots this user occupies as a tenant (separate from ownership)
+  tenantLots         StrataLot[]         @relation("LotTenant")
+
+  /// All council seats this user holds or has held (across buildings)
+  councilMemberships CouncilMembership[]
+
+  // ── Phase 2 (ops) back-relations ────────────────────────────────────────
+  createdMeetings      Meeting[]            @relation("MeetingCreatedBy")
+  uploadedDocuments    Document[]           @relation("DocumentUploadedBy")
+  createdMinutes       Minutes[]            @relation("MinutesCreatedBy")
+  publishedMinutes     Minutes[]            @relation("MinutesPublishedBy")
+  auditLogs            AuditLog[]
+
+  // ── Phase 2 (financial/maintenance) back-relations ───────────────────────
+  createdRequests      MaintenanceRequest[] @relation("RequestCreatedBy")
+  assignedRequests     MaintenanceRequest[] @relation("RequestAssignedTo")
+  issuedInvoices       Invoice[]            @relation("InvoiceIssuedTo")
+  createdInvoices      Invoice[]            @relation("InvoiceCreatedBy")
+  payments             Payment[]            @relation("PaymentMadeBy")
+
+  // ── Phase 2 (notification/inventory/vote) back-relations ─────────────────
+  notifications         Notification[]
+  createdInventoryItems InventoryItem[]      @relation("InventoryCreatedBy")
+  purchaseRequests      PurchaseRequest[]    @relation("PurchaseRequestedBy")
+  approvedRequests      PurchaseRequest[]    @relation("PurchaseApprovedBy")
+  stockTransactions     StockTransaction[]
+  createdVotes          Vote[]               @relation("VoteCreatedBy")
+  voteParticipants      VoteParticipant[]
+  ballots               Ballot[]             // nullable for anonymous — see Ballot model
+
+  @@index([email])
+  @@index([role])
+  @@index([isActive])
+  @@map("users")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUILDING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A strata-titled building (or complex) managed on the platform.
+/// This is the top-level tenancy boundary — all lots, councils, meetings,
+/// documents, and financial records belong to exactly one building.
+model Building {
+  id   String @id @default(cuid())
+
+  /// Display name, e.g. "Parkview Strata BCS1234"
+  name String
+
+  /// Official government strata-plan number. Unique because a plan number
+  /// unambiguously identifies one legal strata corporation.
+  strataNumber String? @unique
+
+  // ── Address ─────────────────────────────────────────────────────────────
+  address    String
+  city       String
+  province   String  @default("BC")
+  postalCode String
+  country    String  @default("CA")
+
+  // ── Locale / operational settings ───────────────────────────────────────
+  timezone   String  @default("America/Vancouver")
+  currency   String  @default("CAD")
+
+  // ── Physical details ────────────────────────────────────────────────────
+  /// Declared at creation; actual count is derived from StrataLot rows
+  totalUnits Int
+  yearBuilt  Int?
+
+  // ── Optional metadata ───────────────────────────────────────────────────
+  website    String?
+  logoUrl    String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  strataLots         StrataLot[]
+  councilMemberships CouncilMembership[]
+
+  // Phase 2 (ops) back-relations
+  meetings             Meeting[]
+  documents            Document[]
+
+  // Phase 2 (financial/maintenance) back-relations
+  maintenanceRequests  MaintenanceRequest[]
+  invoices             Invoice[]
+  payments             Payment[]
+
+  // Phase 2 (notification/inventory/vote) back-relations
+  notifications        Notification[]
+  inventoryItems       InventoryItem[]
+  purchaseRequests     PurchaseRequest[]
+  stockTransactions    StockTransaction[]
+  votes                Vote[]
+
+  @@index([strataNumber])
+  @@index([city, province])
+  @@index([isActive])
+  @@map("buildings")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRATA LOT (Unit)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An individual strata lot (unit) within a building.
+/// Owner and Tenant are separate nullable User FKs so that:
+///   - A lot can exist before an owner is registered (new building onboarding)
+///   - Ownership can transfer without touching the tenant record
+///   - A user can own multiple lots (investor)
+///   - A user can be a tenant without being an owner (and vice-versa)
+model StrataLot {
+  id         String @id @default(cuid())
+  buildingId String
+
+  /// Human-readable unit identifier, e.g. "101", "PH2", "B-304"
+  unitNumber String
+
+  // ── Physical attributes ─────────────────────────────────────────────────
+  floor          Int?
+  bedrooms       Int?
+  /// Decimal allows half-baths: 1.5, 2.5, etc.
+  bathrooms      Decimal? @db.Decimal(3, 1)
+  squareFeet     Int?
+
+  /// Unit entitlement — the lot's proportional share of common expenses
+  /// and voting weight. Stored as a positive integer (the legislated unit
+  /// entitlement schedule value). Percentage = this / SUM(all lots in building).
+  unitEntitlement Int @default(1)
+
+  parkingSpots   Int @default(0)
+  storageLockers Int @default(0)
+
+  // ── Occupancy ───────────────────────────────────────────────────────────
+  /// Nullable: lot may not yet have a registered owner
+  ownerId  String?
+  /// Nullable: lot may be owner-occupied (no separate tenant)
+  tenantId String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Restrict)
+
+  /// onDelete: SetNull — if an owner account is removed, the lot stays and
+  /// just becomes unassigned (preserving financial/audit history).
+  owner  User? @relation("LotOwner",  fields: [ownerId],  references: [id], onDelete: SetNull)
+  tenant User? @relation("LotTenant", fields: [tenantId], references: [id], onDelete: SetNull)
+
+  // Phase 2 (ops) back-relations
+  documents Document[]
+
+  // Phase 2 (financial/maintenance) back-relations
+  maintenanceRequests MaintenanceRequest[]
+  invoices            Invoice[]
+
+  /// A unit number must be unique within a building (natural key composite)
+  @@unique([buildingId, unitNumber])
+  @@index([buildingId])
+  @@index([ownerId])
+  @@index([tenantId])
+  @@index([buildingId, isActive])
+  @@map("strata_lots")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COUNCIL MEMBERSHIP
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Represents a council seat held by a user in a specific building.
+/// Designed to support term history (termEnd = null means current seat).
+///
+/// Uniqueness rule: one ACTIVE role per user per building, enforced via
+/// a partial unique index in the migration SQL (Prisma does not support
+/// partial indexes natively — see migration notes below).
+model CouncilMembership {
+  id         String      @id @default(cuid())
+  userId     String
+  buildingId String
+  role       CouncilRole
+
+  /// When the seat begins (defaults to creation time; can be backdated)
+  termStart DateTime @default(now())
+
+  /// null = seat is currently active.
+  /// Set termEnd to close a seat without hard-deleting the historical record.
+  termEnd DateTime?
+
+  /// Derived convenience flag. Must be kept in sync with termEnd:
+  ///   isActive = true  → termEnd IS NULL
+  ///   isActive = false → termEnd IS NOT NULL
+  /// Application layer enforces this invariant on every write.
+  isActive Boolean @default(true)
+
+  /// Optional notes (e.g. "appointed to fill vacancy", "resigned")
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  user     User     @relation(fields: [userId],     references: [id], onDelete: Cascade)
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+
+  // Composite index for common query: "all active council members in building X"
+  @@index([buildingId, isActive])
+  // Lookup: "all seats held by user Y"
+  @@index([userId])
+  // Used when checking for duplicate active memberships
+  @@index([userId, buildingId, isActive])
+  @@map("council_memberships")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERMISSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A named, granular capability in the system.
+/// Permissions are immutable platform-level definitions — they are seeded
+/// once and never created at runtime by end users.
+///
+/// Key format: "<resource>:<action>"   e.g. "document:upload"
+///
+/// Design choice — why NOT a Role table?
+///   UserRole and CouncilRole are already the canonical role records.
+///   Adding a Role table would either duplicate those enum values or force
+///   us to replace the enums with FK references, breaking the NextAuth
+///   adapter and all existing queries.  Instead, RolePermission references
+///   the enum VALUES directly as nullable columns, with a CHECK constraint
+///   guaranteeing exactly one is populated per row.  The enums remain the
+///   single source of truth for role identity.
+model Permission {
+  id          String          @id @default(cuid())
+
+  /// Unique slug used in code: "document:upload", "payment:approve", etc.
+  /// Format enforced at application layer: must match /^[a-z_]+:[a-z_]+$/
+  key         String          @unique
+
+  /// Logical grouping for display and bulk operations (e.g. "document")
+  resource    String
+
+  /// The operation permitted (e.g. "upload", "delete", "approve")
+  action      String
+
+  /// Which role axis this permission belongs to.
+  ///   system   → assigned to UserRole values
+  ///   building → assigned to CouncilRole values
+  scope       PermissionScope
+
+  /// Human-readable explanation shown in admin UI
+  description String?
+
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@index([resource])
+  @@index([scope])
+  @@index([resource, action])
+  @@map("permissions")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROLE PERMISSION  (join table)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Maps a role (system OR council) to a permission.
+///
+/// INVARIANT (enforced by CHECK constraint in migration SQL):
+///   Exactly one of {systemRole, councilRole} must be non-null per row.
+///   This is not expressible in Prisma DSL — see migration 0002.
+///
+/// Why two nullable columns instead of a discriminated-union table?
+///   A discriminated-union would require two join tables
+///   (SystemRolePermission, CouncilRolePermission), duplicating all
+///   permission-check logic.  A single table with a CHECK constraint is
+///   simpler to query, easier to cache, and still fully integrity-checked
+///   at the database level.
+///
+/// Unique indexes prevent duplicate grants:
+///   (permissionId, systemRole)  — one grant per system-role+permission pair
+///   (permissionId, councilRole) — one grant per council-role+permission pair
+///
+/// Permission check at API level (pseudocode):
+///   1. Fetch user.role → query RolePermission WHERE systemRole = user.role
+///   2. If buildingId provided, fetch active CouncilMembership.role →
+///      query RolePermission WHERE councilRole = membership.role
+///   3. admin always passes (short-circuit before any DB call)
+model RolePermission {
+  id           String       @id @default(cuid())
+  permissionId String
+
+  /// Set when this grant applies to a system-level role (scope = system).
+  /// Matches values from the UserRole enum.
+  systemRole   UserRole?
+
+  /// Set when this grant applies to a council-level role (scope = building).
+  /// Matches values from the CouncilRole enum.
+  councilRole  CouncilRole?
+
+  createdAt    DateTime @default(now())
+
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  // Prevent duplicate grants for the same role+permission combination.
+  // NULL values are excluded from unique checks in PostgreSQL, so two rows
+  // with (permId, systemRole=admin, councilRole=NULL) and
+  // (permId, systemRole=NULL, councilRole=president) do NOT conflict — correct.
+  @@unique([permissionId, systemRole])
+  @@unique([permissionId, councilRole])
+
+  // Fast lookup: "all permissions for system role X" / "all permissions for council role Y"
+  @@index([systemRole])
+  @@index([councilRole])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MEETING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A formal gathering of the strata council or all owners.
+///
+/// Lifecycle:  scheduled → in_progress → completed (then minutes drafted)
+///             or:         scheduled → cancelled
+///
+/// One Meeting has many AgendaItems and at most one Minutes record.
+/// Documents can be attached to a meeting via Document.meetingId.
+model Meeting {
+  id           String        @id @default(cuid())
+  buildingId   String
+
+  title        String
+  type         MeetingType
+  status       MeetingStatus @default(scheduled)
+
+  /// When the meeting is scheduled to begin (or actually began)
+  scheduledAt  DateTime
+
+  /// When the meeting actually concluded (null until completed)
+  endedAt      DateTime?
+
+  /// Physical location or address (nullable for remote-only meetings)
+  location     String?
+
+  /// Video conference URL (Zoom, Teams, etc.) — nullable
+  videoUrl     String?
+
+  /// Minimum number of attendees required for quorum (null = not tracked)
+  quorum       Int?
+
+  /// Actual attendee count, recorded after the meeting ends
+  attendeeCount Int?
+
+  /// Internal pre-meeting notes visible to council only
+  notes        String?       @db.Text
+
+  createdById  String
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // ── Relations ──────────────────────────────────────────────────────────
+  building    Building     @relation(fields: [buildingId],  references: [id], onDelete: Restrict)
+  createdBy   User         @relation("MeetingCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  agendaItems AgendaItem[]
+  minutes     Minutes?     // at most one set of minutes per meeting
+  documents   Document[]   // supporting documents attached to this meeting
+
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, scheduledAt])
+  @@index([createdById])
+  @@map("meetings")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AGENDA ITEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An individual item on a meeting agenda.
+///
+/// Items are ordered by sortOrder (ascending).  The agenda is built before
+/// the meeting; statuses are updated live or immediately after.
+///
+/// Resolution text captures the formal outcome (e.g. "Motion to approve
+/// the 2025 budget carried 5-0") — separate from discussion notes stored
+/// in the Minutes body.
+model AgendaItem {
+  id          String           @id @default(cuid())
+  meetingId   String
+
+  title       String
+
+  /// Optional expanded description or supporting context for this item
+  description String?          @db.Text
+
+  /// 0-based display order; items with equal sortOrder are sorted by createdAt
+  sortOrder   Int              @default(0)
+
+  /// Name of the person leading this item (free text; may not be a system User)
+  presenter   String?
+
+  /// Allotted time in minutes (informational; not enforced)
+  durationMins Int?
+
+  status      AgendaItemStatus @default(pending)
+
+  /// Formal resolution or outcome text (populated when status = resolved)
+  resolution  String?          @db.Text
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+  @@index([meetingId, sortOrder])
+  @@map("agenda_items")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MINUTES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The official written record of a meeting.
+///
+/// One Meeting → at most one Minutes (enforced by @unique on meetingId).
+///
+/// Content is stored as rich text (Markdown / HTML) directly in the DB.
+/// An optional documentId links to a separately uploaded PDF version —
+/// useful when minutes are drafted in Word then exported.
+///
+/// Lifecycle: draft → under_review → approved → published
+///   Each status transition is recorded in AuditLog.
+model Minutes {
+  id          String        @id @default(cuid())
+
+  /// 1:1 with Meeting — enforced by @unique
+  meetingId   String        @unique
+
+  /// Full minutes text (Markdown or sanitised HTML)
+  content     String        @db.Text
+
+  status      MinutesStatus @default(draft)
+
+  /// Timestamp when the council formally approved the minutes
+  approvedAt  DateTime?
+
+  /// Timestamp when minutes were made visible to all eligible members
+  publishedAt DateTime?
+
+  /// User who created (drafted) the minutes
+  createdById String
+
+  /// User who triggered the publish action (may differ from creator)
+  publishedById String?
+
+  /// Optional link to a PDF/Word document version stored in S3
+  /// (Document.category should be "minutes" if this is set)
+  documentId  String?       @unique
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  meeting     Meeting   @relation(fields: [meetingId],    references: [id], onDelete: Cascade)
+  createdBy   User      @relation("MinutesCreatedBy",  fields: [createdById],   references: [id], onDelete: Restrict)
+  publishedBy User?     @relation("MinutesPublishedBy", fields: [publishedById], references: [id], onDelete: SetNull)
+
+  /// Optional PDF attachment; @unique ensures one Minutes per Document max
+  document    Document? @relation("MinutesDocument", fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([meetingId])
+  @@index([status])
+  @@map("minutes")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DOCUMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A file (PDF, DOCX, image, etc.) stored in S3 and indexed here.
+///
+/// ── Versioning strategy: groupId ──────────────────────────────────────────
+/// Rather than a self-referential parentId FK, all versions of the same
+/// logical document share a common `groupId` (a cuid generated on the
+/// initial upload).  Subsequent uploads increment `version` and mark the
+/// prior version isCurrentVersion = false.
+///
+///   groupId = "abc123", version=1, isCurrentVersion=false  ← superseded
+///   groupId = "abc123", version=2, isCurrentVersion=true   ← current
+///
+/// Why not parentId (self-referential)?
+///   Null parentIds in a unique index behave unexpectedly in some ORMs and
+///   require nullable FK handling.  groupId is a plain unique string with
+///   no FK, making version-chain queries trivially simple:
+///     WHERE groupId = ? ORDER BY version DESC
+///
+/// ── Access control ────────────────────────────────────────────────────────
+/// `isPublic` = false (default) means only council members and above can
+/// view the document.  Service layer enforces visibility based on this flag
+/// and the requesting user's role.  Tenant-visible documents are explicitly
+/// set to isPublic = true by an authorised council member.
+model Document {
+  id          String           @id @default(cuid())
+
+  // ── Scope ────────────────────────────────────────────────────────────────
+  buildingId  String
+
+  /// Optional: link to a specific unit (e.g. a renovation approval letter)
+  lotId       String?
+
+  /// Optional: document was uploaded in the context of a meeting
+  meetingId   String?
+
+  // ── Content metadata ─────────────────────────────────────────────────────
+  title       String
+  description String?          @db.Text
+  category    DocumentCategory
+
+  // ── Versioning ───────────────────────────────────────────────────────────
+  /// Shared across all versions of the same logical document
+  groupId     String
+
+  /// Monotonically increasing per groupId; starts at 1
+  version     Int              @default(1)
+
+  /// Only one row per groupId should have this = true.
+  /// Application layer enforces this on every upload.
+  isCurrentVersion Boolean     @default(true)
+
+  // ── Storage ───────────────────────────────────────────────────────────────
+  /// S3 object key (relative path within the bucket)
+  s3Key       String           @unique
+
+  /// File size in bytes
+  sizeBytes   Int
+
+  /// MIME type validated on upload (e.g. "application/pdf")
+  mimeType    String
+
+  // ── Access ────────────────────────────────────────────────────────────────
+  /// true = visible to tenants and owners; false = council/admin only
+  isPublic    Boolean          @default(false)
+
+  uploadedById String
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building   Building   @relation(fields: [buildingId], references: [id], onDelete: Restrict)
+  lot        StrataLot? @relation(fields: [lotId],      references: [id], onDelete: SetNull)
+  meeting    Meeting?   @relation(fields: [meetingId],  references: [id], onDelete: SetNull)
+  uploadedBy User       @relation("DocumentUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  /// Back-relation: if this document is the PDF attachment for a Minutes record
+  minutes    Minutes?   @relation("MinutesDocument")
+
+  // ── Version chain: "all documents in the same group" ─────────────────────
+  @@unique([groupId, version])
+
+  @@index([buildingId])
+  @@index([buildingId, category])
+  @@index([buildingId, isCurrentVersion])
+  @@index([groupId])
+  @@index([meetingId])
+  @@index([lotId])
+  @@index([uploadedById])
+  @@map("documents")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUDIT LOG
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Immutable, append-only record of every significant action in the system.
+///
+/// Design principles:
+///   1. Generic — one table covers all resources; no per-resource audit tables
+///   2. Immutable — no updatedAt, no soft-delete, no FK cascade deletes
+///      (User FK uses SetNull so log survives account deletion)
+///   3. Structured payload — before/after stored as JSONB for diff queries
+///   4. Nullable userId — supports system/automated actions (cron jobs, webhooks)
+///
+/// Querying patterns this schema supports:
+///   • "Show full history of document X"  → WHERE resource='document' AND resourceId=X
+///   • "Show all actions by user Y"       → WHERE userId=Y
+///   • "Show building Z activity feed"    → WHERE buildingId=Z ORDER BY createdAt DESC
+///   • "Show all deletes today"           → WHERE action='delete' AND createdAt > today
+model AuditLog {
+  id         String      @id @default(cuid())
+
+  // ── Actor ─────────────────────────────────────────────────────────────────
+  /// null for automated/system actions (webhooks, cron, migrations)
+  userId     String?
+
+  // ── Subject ───────────────────────────────────────────────────────────────
+  /// Model name in lowercase: "meeting", "document", "user", "payment", etc.
+  /// Use the @@map table name for consistency: "strata_lots" → "strata_lot"
+  resource   String
+
+  /// The primary key of the affected record
+  resourceId String
+
+  // ── Context ───────────────────────────────────────────────────────────────
+  action     AuditAction
+
+  /// Building context; null for platform-level actions (e.g. user.login)
+  buildingId String?
+
+  // ── Payload ───────────────────────────────────────────────────────────────
+  /// Full record state BEFORE the change (null for creates)
+  before     Json?       @db.JsonB
+
+  /// Full record state AFTER the change (null for hard deletes)
+  after      Json?       @db.JsonB
+
+  /// Human-readable summary for display in the activity feed
+  /// e.g. "Published minutes for Q1 Council Meeting"
+  summary    String?
+
+  // ── Request metadata ──────────────────────────────────────────────────────
+  ipAddress  String?
+  userAgent  String?
+
+  /// Intentionally no updatedAt — audit logs are immutable.
+  createdAt  DateTime    @default(now())
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  /// SetNull: deleting a user account preserves audit history
+  user       User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // ── Indexes ───────────────────────────────────────────────────────────────
+  // Primary lookup: history of a specific record
+  @@index([resource, resourceId])
+  // Actor history
+  @@index([userId])
+  // Building activity feed (most common dashboard query)
+  @@index([buildingId, createdAt])
+  // Audit reports by action type + time
+  @@index([action, createdAt])
+  // General time-series (log viewer, admin panel)
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAINTENANCE REQUEST
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A request to repair, inspect, or address a defect in a building or unit.
+///
+/// Lifecycle (enforced at service layer; forward-only):
+///   open → in_progress → resolved → closed
+///
+/// Attachments:
+///   S3 keys for photos/files are stored as a PostgreSQL TEXT[] array.
+///   This avoids a join table for now. When the Attachment model is built
+///   (Phase 6), these keys will be migrated into it and this field dropped.
+///
+/// Cost tracking:
+///   estimatedCostCents and actualCostCents are optional. They feed into
+///   the building's financial records and can trigger an Invoice creation
+///   (repair_charge type) when the work is completed.
+///
+/// AuditLog compatibility:
+///   Every status transition writes an AuditLog row:
+///     resource = "maintenance_request", action = "update"
+///     before/after include the full status + assignedToId snapshot.
+model MaintenanceRequest {
+  id         String @id @default(cuid())
+  buildingId String
+
+  /// The specific lot the issue relates to (null = common area)
+  lotId      String?
+
+  // ── Description ───────────────────────────────────────────────────────────
+  title       String
+  description String              @db.Text
+  category    MaintenanceCategory
+  priority    MaintenancePriority @default(medium)
+  status      MaintenanceStatus   @default(open)
+
+  // ── Assignment ────────────────────────────────────────────────────────────
+  /// Who reported the issue (owner, tenant, or council member)
+  createdById  String
+
+  /// Staff member, council member, or contractor managing the work.
+  /// Nullable — may not be assigned immediately on creation.
+  assignedToId String?
+
+  // ── Dates ────────────────────────────────────────────────────────────────
+  /// When work was marked as completed (status = resolved)
+  resolvedAt DateTime?
+
+  /// When the request was formally closed (status = closed)
+  closedAt   DateTime?
+
+  // ── Cost (optional) ───────────────────────────────────────────────────────
+  /// Quote or rough estimate before work begins (integer cents)
+  estimatedCostCents Int?
+
+  /// Final invoiced cost after work is complete (integer cents)
+  actualCostCents    Int?
+
+  // ── Attachments (temporary — see model doc) ───────────────────────────────
+  /// S3 object keys for photos, reports, or supporting files.
+  /// Max 10 per request recommended; validated at service layer.
+  attachmentKeys String[] @default([])
+
+  // ── Notes ─────────────────────────────────────────────────────────────────
+  /// Internal notes visible to council and managers only
+  internalNotes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building   Building   @relation(fields: [buildingId],  references: [id], onDelete: Restrict)
+  lot        StrataLot? @relation(fields: [lotId],       references: [id], onDelete: SetNull)
+  createdBy  User       @relation("RequestCreatedBy",  fields: [createdById],  references: [id], onDelete: Restrict)
+  assignedTo User?      @relation("RequestAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  /// A maintenance request may eventually generate a repair_charge invoice
+  invoices Invoice[]
+
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, priority])
+  @@index([buildingId, status, priority])
+  @@index([lotId])
+  @@index([createdById])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@map("maintenance_requests")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INVOICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// What a lot owner owes the strata corporation.
+///
+/// Separation from Payment:
+///   Invoice = the obligation (what is owed, to whom, by when).
+///   Payment = a transaction that reduces that obligation.
+///   This mirrors standard accounts-receivable accounting and allows
+///   partial payments, refunds, and write-offs without data loss.
+///
+/// Monetary values:
+///   All amounts stored as INTEGER CENTS (e.g. $125.50 → 12550).
+///   Never use FLOAT or DECIMAL for money — integer arithmetic is exact.
+///
+/// paidCents (denormalised):
+///   Maintained as a running total by the service layer on every Payment
+///   create/update. Avoids a SUM() on every invoice display.
+///   MUST be kept in sync; the migration adds a CHECK to prevent paidCents
+///   from exceeding amountCents at the DB level.
+///
+/// Period fields:
+///   periodStart / periodEnd support recurring strata fee invoices —
+///   e.g. "April 2025 strata fee for Unit 101 (2025-04-01 to 2025-04-30)".
+///
+/// Webhook readiness:
+///   externalRef stores the ID from an external accounting system (e.g.
+///   QuickBooks invoice number) for reconciliation. Payment rows carry
+///   the provider-specific transaction references.
+model Invoice {
+  id         String @id @default(cuid())
+  buildingId String
+
+  /// The lot this invoice is billed to (null = building-wide charge)
+  lotId      String?
+
+  /// Optional link to the maintenance request that generated this invoice
+  /// (relevant for repair_charge type invoices)
+  maintenanceRequestId String?
+
+  // ── Billing party ─────────────────────────────────────────────────────────
+  /// The owner or tenant who is expected to pay
+  issuedToId  String
+
+  /// The admin or manager who created the invoice
+  createdById String
+
+  // ── Charge details ────────────────────────────────────────────────────────
+  type        InvoiceType
+  status      InvoiceStatus @default(draft)
+  description String        @db.Text
+
+  /// Total amount owed in cents (e.g. 12550 = $125.50 CAD)
+  amountCents Int
+
+  /// Running total of completed payments applied to this invoice (cents).
+  /// Updated atomically by the service layer; never written directly by API callers.
+  paidCents   Int           @default(0)
+
+  // ── Dates ─────────────────────────────────────────────────────────────────
+  /// When payment is expected — used by scheduled job to flip status to overdue
+  dueDate    DateTime
+
+  /// When the invoice was formally sent to the recipient (null = draft)
+  issuedAt   DateTime?
+
+  // ── Period (for recurring fees) ───────────────────────────────────────────
+  /// Start of the billing period (e.g. 2025-04-01 for April strata fee)
+  periodStart DateTime?
+
+  /// End of the billing period (e.g. 2025-04-30 for April strata fee)
+  periodEnd   DateTime?
+
+  // ── External reference ───────────────────────────────────────────────────
+  /// ID in an external accounting system (QuickBooks, Xero, etc.)
+  externalRef String?
+
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building           Building            @relation(fields: [buildingId],         references: [id], onDelete: Restrict)
+  lot                StrataLot?          @relation(fields: [lotId],              references: [id], onDelete: SetNull)
+  maintenanceRequest MaintenanceRequest? @relation(fields: [maintenanceRequestId], references: [id], onDelete: SetNull)
+  issuedTo           User                @relation("InvoiceIssuedTo",  fields: [issuedToId],  references: [id], onDelete: Restrict)
+  createdBy          User                @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  payments Payment[]
+
+  // Frequent dashboard queries
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, dueDate])
+  @@index([buildingId, type])
+  @@index([issuedToId])
+  @@index([lotId])
+  @@index([maintenanceRequestId])
+  @@index([dueDate])
+  @@index([status, dueDate])     // overdue job: WHERE status != 'paid' AND dueDate < now()
+  @@map("invoices")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAYMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A financial transaction that (partially or fully) settles an invoice.
+///
+/// One Invoice → many Payments (partial payments allowed).
+///
+/// Webhook integration design:
+///   providerRef     — provider's unique transaction ID (e.g. Stripe ch_xxx).
+///                     Combined with provider gives a globally unique key.
+///   webhookEventId  — the provider's event envelope ID (e.g. Stripe evt_xxx).
+///                     Stored for idempotency: reject duplicate webhook deliveries.
+///   providerPayload — raw JSON body of the inbound webhook, stored as JSONB.
+///                     Used for debugging, reconciliation, and chargeback evidence.
+///
+/// Partial payment flow:
+///   1. Payment created (status = pending) when owner initiates.
+///   2. Webhook received → status → completed, Invoice.paidCents incremented.
+///   3. If Invoice.paidCents >= Invoice.amountCents → Invoice.status → paid.
+///   4. If Invoice.paidCents > 0 but < amountCents → Invoice.status → partially_paid.
+///
+/// Refund flow:
+///   Create a new Payment row with a negative amountCents and status = refunded.
+///   Do NOT mutate the original Payment row (audit trail must be preserved).
+model Payment {
+  id         String @id @default(cuid())
+  buildingId String
+
+  /// The invoice this payment is applied to
+  invoiceId  String
+
+  /// Who made the payment (lot owner or tenant)
+  paidById   String
+
+  // ── Transaction details ───────────────────────────────────────────────────
+  status      PaymentStatus  @default(pending)
+  method      PaymentMethod
+  provider    PaymentProvider
+
+  /// Amount in cents. Positive = payment; negative = refund.
+  amountCents Int
+
+  /// When the payment was confirmed as cleared (null until completed/refunded)
+  paidAt     DateTime?
+
+  // ── External provider references ─────────────────────────────────────────
+  /// Provider's unique transaction/charge ID (e.g. "ch_3PqXYZ" for Stripe).
+  /// Null for manually recorded payments.
+  providerRef String?
+
+  /// Provider's webhook event envelope ID.
+  /// Stored to detect and reject duplicate webhook deliveries.
+  webhookEventId String?
+
+  /// Raw JSON payload from the provider webhook.
+  /// Stored as JSONB for query support and as an audit trail.
+  providerPayload Json? @db.JsonB
+
+  // ── Failure details ───────────────────────────────────────────────────────
+  /// Machine-readable failure code from the provider (e.g. "insufficient_funds")
+  failureCode   String?
+
+  /// Human-readable message from the provider or entered by admin
+  failureReason String?
+
+  notes     String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Restrict)
+  invoice  Invoice  @relation(fields: [invoiceId],  references: [id], onDelete: Restrict)
+  paidBy   User     @relation("PaymentMadeBy", fields: [paidById], references: [id], onDelete: Restrict)
+
+  // Idempotency: one completed transaction per provider+ref combination
+  @@unique([provider, providerRef])
+
+  // Webhook idempotency: one row per webhook event
+  @@unique([webhookEventId])
+
+  @@index([buildingId])
+  @@index([invoiceId])
+  @@index([paidById])
+  @@index([status])
+  @@index([buildingId, status])
+  @@index([provider, providerRef])   // reconciliation queries
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NOTIFICATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A single notification message delivered to one user via one channel.
+///
+/// Multi-channel delivery:
+///   The service layer creates one Notification row per channel per recipient.
+///   For example, a meeting reminder may produce two rows for Bob:
+///     { channel: in_app, userId: bob.id, ... }
+///     { channel: email,  userId: bob.id, ... }
+///   This lets each channel track its own delivery state independently.
+///
+/// Broadcast notifications:
+///   The service layer iterates over eligible recipients and inserts one row
+///   per user. Never store a list of userIds on a single row.
+///
+/// metadata (JSONB):
+///   Flexible payload for deep-linking and template variables.
+///   Expected shape (not enforced at DB level):
+///     {
+///       resourceType: "maintenance_request" | "meeting" | "invoice" | ...,
+///       resourceId:   "<cuid>",
+///       href:         "/buildings/<id>/maintenance/<id>",
+///       buildingId:   "<cuid>"
+///     }
+///
+/// Immutability:
+///   Notifications are never edited after creation — only readAt is stamped.
+///   No updatedAt column.
+model Notification {
+  id         String              @id @default(cuid())
+  userId     String
+
+  /// Building context; null for platform-level notifications (welcome, security)
+  buildingId String?
+
+  type       NotificationType
+  channel    NotificationChannel
+
+  title      String
+  message    String              @db.Text
+
+  /// null = unread; populated when the user marks it as read
+  readAt     DateTime?
+
+  /// For email channel: when the message was dispatched to the mail queue.
+  /// null = not yet sent (may be queued or failed)
+  emailSentAt DateTime?
+
+  /// Flexible JSON payload — deep-link data, template vars, resource references.
+  /// Validated and typed at the service layer, not the DB layer.
+  metadata   Json?               @db.JsonB
+
+  createdAt  DateTime            @default(now())
+  // Intentionally no updatedAt — only readAt is ever written after creation
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  user       User                @relation(fields: [userId],     references: [id], onDelete: Cascade)
+  building   Building?           @relation(fields: [buildingId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([userId, readAt])            // unread count: WHERE userId=? AND readAt IS NULL
+  @@index([userId, channel])           // channel-specific inbox
+  @@index([buildingId])
+  @@index([type, createdAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INVENTORY ITEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A physical item held in stock by the building (bulbs, cleaning supplies, etc.).
+///
+/// Quantity integrity rule:
+///   quantityOnHand is NEVER updated directly by API callers.
+///   All quantity changes must go through StockTransaction, which updates
+///   quantityOnHand atomically in the same DB transaction.
+///   This creates an auditable ledger identical to the AuditLog pattern.
+///
+/// Low-stock alerting:
+///   When a StockTransaction reduces quantityOnHand below lowStockThreshold,
+///   the service layer enqueues a `low_stock` Notification to council members.
+model InventoryItem {
+  id          String            @id @default(cuid())
+  buildingId  String
+
+  name        String
+  description String?           @db.Text
+  category    InventoryCategory
+  sku         String?           // Supplier's item code for reordering
+
+  /// Unit of measure shown alongside quantity (e.g. "each", "box of 10", "litre")
+  unit        String            @default("each")
+
+  /// Current stock level.  Updated atomically via StockTransaction only.
+  quantityOnHand    Int         @default(0)
+
+  /// Alert threshold — triggers low_stock notification when quantityOnHand drops below this
+  lowStockThreshold Int         @default(0)
+
+  /// Suggested quantity to order when restocking
+  reorderQuantity   Int         @default(1)
+
+  /// Last known unit cost in cents (updated when stock is received)
+  unitCostCents     Int?
+
+  /// Supplier name, website, or contact reference
+  supplier    String?
+
+  /// Physical storage location within the building (e.g. "B1 Storage Room, Shelf 3")
+  location    String?
+
+  isActive    Boolean           @default(true)
+  createdById String
+
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building          Building          @relation(fields: [buildingId],  references: [id], onDelete: Restrict)
+  createdBy         User              @relation("InventoryCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  stockTransactions StockTransaction[]
+  purchaseRequests  PurchaseRequest[]
+
+  @@index([buildingId])
+  @@index([buildingId, category])
+  @@index([buildingId, isActive])
+  @@index([createdById])
+  @@map("inventory_items")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PURCHASE REQUEST
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A request to purchase new stock for the building's inventory.
+///
+/// Lifecycle (forward-only, enforced at service layer):
+///   requested → approved → ordered → received
+///   Any non-received state → cancelled
+///
+/// On status = received:
+///   The service layer creates a StockTransaction of type `received` and
+///   increments InventoryItem.quantityOnHand atomically.
+///
+/// inventoryItemId is nullable to support requests for items not yet in the
+/// catalogue. On approval, a new InventoryItem may be created first.
+model PurchaseRequest {
+  id         String                @id @default(cuid())
+  buildingId String
+
+  /// May be null if the item doesn't exist in the catalogue yet
+  inventoryItemId String?
+
+  title           String
+  description     String?           @db.Text
+
+  status          PurchaseRequestStatus @default(requested)
+
+  quantityRequested Int
+  /// Populated when status transitions to received
+  quantityReceived  Int?
+
+  /// Estimated unit cost at time of request (cents)
+  estimatedUnitCostCents Int?
+
+  /// Actual unit cost from the supplier invoice (cents)
+  actualUnitCostCents    Int?
+
+  supplier        String?
+
+  // ── Actors ────────────────────────────────────────────────────────────────
+  requestedById   String
+  approvedById    String?
+
+  // ── Status timestamps ────────────────────────────────────────────────────
+  approvedAt      DateTime?
+  orderedAt       DateTime?
+  receivedAt      DateTime?
+
+  notes           String?           @db.Text
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building       Building       @relation(fields: [buildingId],     references: [id], onDelete: Restrict)
+  inventoryItem  InventoryItem? @relation(fields: [inventoryItemId], references: [id], onDelete: SetNull)
+  requestedBy    User           @relation("PurchaseRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  approvedBy     User?          @relation("PurchaseApprovedBy",  fields: [approvedById],  references: [id], onDelete: SetNull)
+
+  /// StockTransaction created when status → received
+  stockTransaction StockTransaction?
+
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([inventoryItemId])
+  @@index([requestedById])
+  @@index([approvedById])
+  @@map("purchase_requests")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STOCK TRANSACTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An immutable record of a quantity change on an InventoryItem.
+///
+/// Every change to InventoryItem.quantityOnHand is mediated by one of these
+/// rows — there is no other legitimate path to alter stock levels.
+///
+/// quantityDelta:
+///   Signed integer. Positive = stock in, negative = stock out.
+///   e.g. +10 (received delivery), -2 (issued to contractor), -1 (damaged)
+///
+/// quantityBefore / quantityAfter:
+///   Snapshots at the moment of transaction. Allows ledger reconstruction
+///   and integrity verification without replaying the full transaction log:
+///     SELECT * FROM stock_transactions WHERE inventoryItemId = ?
+///     ORDER BY createdAt ASC
+///   The first row's quantityBefore should be 0; each row's quantityAfter
+///   must equal the next row's quantityBefore.
+///
+/// Immutability:
+///   No updatedAt. Corrections are made via a new `adjustment` transaction,
+///   never by editing a past row.
+model StockTransaction {
+  id         String               @id @default(cuid())
+  buildingId String
+
+  inventoryItemId    String
+  /// Set when this transaction was triggered by a received PurchaseRequest
+  purchaseRequestId  String?      @unique
+
+  transactionType    StockTransactionType
+
+  /// Signed quantity change (positive = in, negative = out)
+  quantityDelta      Int
+
+  /// Snapshot: InventoryItem.quantityOnHand immediately before this transaction
+  quantityBefore     Int
+
+  /// Snapshot: InventoryItem.quantityOnHand immediately after (= before + delta)
+  quantityAfter      Int
+
+  /// Unit cost at time of receipt, for FIFO/AVCO cost tracking (optional)
+  unitCostCents      Int?
+
+  notes              String?      @db.Text
+  createdById        String
+
+  /// Intentionally no updatedAt — stock transactions are immutable
+  createdAt          DateTime     @default(now())
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building        Building        @relation(fields: [buildingId],        references: [id], onDelete: Restrict)
+  inventoryItem   InventoryItem   @relation(fields: [inventoryItemId],   references: [id], onDelete: Restrict)
+  purchaseRequest PurchaseRequest? @relation(fields: [purchaseRequestId], references: [id], onDelete: SetNull)
+  createdBy       User            @relation(fields: [createdById],       references: [id], onDelete: Restrict)
+
+  @@index([buildingId])
+  @@index([inventoryItemId])
+  @@index([inventoryItemId, createdAt])  // ledger replay: ordered history per item
+  @@index([purchaseRequestId])
+  @@index([transactionType])
+  @@index([createdById])
+  @@index([createdAt])
+  @@map("stock_transactions")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOTE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A motion, election, or survey put to building members.
+///
+/// Options are stored in VoteOption (child rows) rather than a JSON array,
+/// enabling referential integrity from Ballot rows and reliable result counts
+/// via simple GROUP BY queries.
+///
+/// Anonymous voting design:
+///   When anonymous = true, the service layer writes:
+///     • VoteParticipant (userId, voteId)  — always, for deduplication gate
+///     • Ballot           (voteId, optionId, userId = NULL)  — choice is anonymous
+///   The unique constraint on VoteParticipant prevents double-voting at DB level
+///   while Ballot.userId = NULL ensures results cannot be linked to identities.
+///   See VoteParticipant and Ballot model docs for full flow.
+model Vote {
+  id         String          @id @default(cuid())
+  buildingId String
+
+  title       String
+  description String          @db.Text
+
+  status      VoteStatus      @default(draft)
+  anonymous   Boolean         @default(false)
+
+  eligibility VoteEligibility @default(all_owners)
+  quorumType  VoteQuorumType  @default(simple_majority)
+
+  /// Required when quorumType = custom (e.g. 75 = 75%)
+  quorumPercent Decimal?      @db.Decimal(5, 2)
+
+  /// When voting opens (may differ from createdAt for pre-scheduled votes)
+  opensAt     DateTime
+  closesAt    DateTime
+
+  createdById String
+
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  building     Building         @relation(fields: [buildingId], references: [id], onDelete: Restrict)
+  createdBy    User             @relation("VoteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  options      VoteOption[]
+  participants VoteParticipant[]
+  ballots      Ballot[]
+
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, opensAt])
+  @@index([buildingId, closesAt])
+  @@index([createdById])
+  @@map("votes")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOTE OPTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A single selectable choice on a Vote.
+///
+/// Common patterns:
+///   Motion:   options = [{ label: "Yes" }, { label: "No" }, { label: "Abstain" }]
+///   Election: options = [{ label: "Candidate A" }, { label: "Candidate B" }]
+///   Survey:   options = [{ label: "Option 1" }, { label: "Option 2" }, ...]
+///
+/// Result counting:
+///   SELECT optionId, COUNT(*) FROM ballots WHERE voteId = ? GROUP BY optionId
+///   — works for both anonymous and non-anonymous because it counts rows, not users.
+model VoteOption {
+  id          String  @id @default(cuid())
+  voteId      String
+
+  label       String
+  description String? @db.Text
+
+  /// 0-based display order
+  sortOrder   Int     @default(0)
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  vote    Vote     @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  ballots Ballot[]
+
+  @@index([voteId])
+  @@index([voteId, sortOrder])
+  @@map("vote_options")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOTE PARTICIPANT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tracks WHICH users have cast a ballot — always stores userId regardless
+/// of whether the vote is anonymous.
+///
+/// This is the double-voting gate.
+///   @@unique([voteId, userId]) enforced at DB level.
+///
+/// Separation of concerns:
+///   VoteParticipant answers: "Has user X voted on vote Y?"  (identity known)
+///   Ballot answers:          "What was the choice made?"    (anonymous if flag set)
+///
+/// Service-layer write sequence (in a single DB transaction):
+///   1. INSERT INTO vote_participants (voteId, userId)
+///      → Fails immediately with unique constraint violation if already voted.
+///      → If it fails, abort the entire transaction. Do not write a Ballot.
+///   2. INSERT INTO ballots (voteId, optionId, userId)
+///      → userId = NULL if vote.anonymous = true
+///      → userId = currentUser.id if vote.anonymous = false
+///
+/// This guarantees atomicity: either both rows exist or neither does.
+model VoteParticipant {
+  id        String   @id @default(cuid())
+  voteId    String
+  userId    String
+  castAt    DateTime @default(now())
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  vote Vote @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// THE double-vote prevention constraint
+  @@unique([voteId, userId])
+  @@index([voteId])
+  @@index([userId])
+  @@map("vote_participants")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BALLOT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The actual choice cast by a participant.
+///
+/// userId is nullable — always NULL when Vote.anonymous = true.
+///
+/// Why not put the choice on VoteParticipant?
+///   Keeping choice and identity on the same row would make truly anonymous
+///   voting impossible — a council member with DB access could JOIN
+///   participants to ballots by rowid or createdAt ordering.
+///   By separating them into two tables with no shared FK between choice and
+///   identity (in the anonymous case), the link is cryptographically severed:
+///   even with full DB read access, ballots cannot be re-attributed to users.
+///
+/// Non-anonymous votes:
+///   userId is populated. A @@unique([voteId, userId]) constraint is NOT
+///   placed here because VoteParticipant already enforces it. Adding it here
+///   would cause issues for write-in / multi-choice votes in the future.
+///   The service layer is the authoritative guard.
+model Ballot {
+  id       String   @id @default(cuid())
+  voteId   String
+  optionId String
+
+  /// NULL when Vote.anonymous = true.
+  /// Non-null when anonymous = false — allows per-user result audits.
+  userId   String?
+
+  /// Server-recorded timestamp (not caller-supplied, to prevent manipulation)
+  castAt   DateTime @default(now())
+
+  // ── Relations ────────────────────────────────────────────────────────────
+  vote   Vote       @relation(fields: [voteId],   references: [id], onDelete: Cascade)
+  option VoteOption @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  user   User?      @relation(fields: [userId],   references: [id], onDelete: SetNull)
+
+  @@index([voteId])
+  @@index([voteId, optionId])  // fast result aggregation: GROUP BY optionId
+  @@index([userId])
+  @@map("ballots")
+}
