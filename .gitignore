@@ -3,6 +3,7 @@ node_modules/
 
 # Next.js
 .next/
+.next/cache/
 out/
 
 # Build output
@@ -12,12 +13,18 @@ dist/
 .env
 .env.local
 .env.*.local
+*.env
 
-# Local development storage (STORAGE_PROVIDER=local)
+# Local development storage
 .uploads/
 
 # Prisma
 prisma/generated/
+prisma/dev.db
+prisma/dev.db-journal
+
+# Claude / AI tooling
+.claude/
 
 # Logs
 *.log
